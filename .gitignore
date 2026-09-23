@@ -1,0 +1,45 @@
+# ==============================================================================
+# SilvaTwin Backend - .gitignore
+# ==============================================================================
+
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Datos satelitales y científicos pesados (NASA GEDI, Sentinel GeoTIFFs, etc.)
+# GitHub bloquea archivos >100MB
+data/gedi/*.h5
+data/gedi/*.hdf5
+data/sentinel2/*.tif
+data/sentinel2/*.tiff
+data/fluxnet/*.csv
+data/soilgrids/*.tif
+data/era5/*.nc
+data/era5/*.grib*
+
+# Mantener la estructura de carpetas
+!data/**/README.md
+!data/**/.gitkeep
+
+# Base de datos SQLite local
+*.db
+*.sqlite3
+silvatwin.db
+silvatwin.db-journal
+
+# Variables de entorno y credenciales
+.env
+.env.local
+!.env.example
+
+# IDEs y logs
+.vscode/
+.idea/
+*.log
