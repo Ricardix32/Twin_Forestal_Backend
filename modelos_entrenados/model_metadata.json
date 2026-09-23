@@ -2,7 +2,7 @@
   "model_name": "Stacking H\u00edbrido (3-PG + ML)",
   "r2": 0.999,
   "rmse": 1.91,
-  "mae": 1.25,
+  "mae": 1.16,
   "features": [
     "RH98_m",
     "NDVI",
