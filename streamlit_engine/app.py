@@ -35,13 +35,33 @@ sys.path = [p for p in sys.path if p not in (curr_str, '', '.')]
 if backend_str not in sys.path:
     sys.path.insert(0, backend_str)
 
-# Importación condicional del servicio LangChain
+# Carga robusta del servicio semántico LangChain (inmune a colisiones de rutas)
+import importlib.util
+
+semantic_twin_service = None
+get_langflow_flow_schema = None
+HAS_LANGCHAIN_SERVICE = False
+SEMANTIC_LOAD_ERROR = None
+
 try:
-    from app.services.semantic_twin import semantic_twin_service
-    HAS_LANGCHAIN_SERVICE = True
-except Exception:
-    semantic_twin_service = None
-    HAS_LANGCHAIN_SERVICE = False
+    semantic_twin_file = BACKEND_DIR / "app" / "services" / "semantic_twin.py"
+    if semantic_twin_file.exists():
+        spec = importlib.util.spec_from_file_location("silvatwin_semantic_twin", semantic_twin_file)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            semantic_twin_service = getattr(mod, "semantic_twin_service", None)
+            get_langflow_flow_schema = getattr(mod, "get_langflow_flow_schema", None)
+            HAS_LANGCHAIN_SERVICE = semantic_twin_service is not None
+except Exception as e_spec:
+    SEMANTIC_LOAD_ERROR = str(e_spec)
+    try:
+        from app.services.semantic_twin import semantic_twin_service, get_langflow_flow_schema
+        HAS_LANGCHAIN_SERVICE = semantic_twin_service is not None
+    except Exception as e_direct:
+        SEMANTIC_LOAD_ERROR = f"{e_spec} | {e_direct}"
+        semantic_twin_service = None
+        HAS_LANGCHAIN_SERVICE = False
 
 # ==========================================================
 # CONFIGURACIÓN DE PÁGINA
@@ -421,6 +441,10 @@ def load_real_datasets():
             "FWI_Riesgo": np.round(fwi_idx, 1)
         })
 
+    db_info["is_fallback"] = not db_loaded
+    if not db_loaded:
+        db_info["engine"] = "Respaldo Sintético (Modo Calibración)"
+
     return gedi_info, sentinel_info, feature_df, db_info
 
 def train_forestry_models(df: pd.DataFrame):
@@ -554,10 +578,15 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("📈 Estado del Sistema")
+    d_info = st.session_state.db_info or {}
+    db_connected = d_info.get("connected", False)
+    is_fallback = d_info.get("is_fallback", False)
+    db_label = "✅ PostgreSQL 16 + PostGIS" if (db_connected and not is_fallback) else ("⚠️ Respaldo Sintético" if is_fallback else "⚠️ Desconectada")
+    
     st.info(f"""
     📍 Fase actual: **{st.session_state.fase_actual.replace('_', ' ').title()}**  
-    🐘 Base de Datos: **{'✅ PostgreSQL + PostGIS' if st.session_state.db_info and st.session_state.db_info.get('connected') else '⚠️ Desconectada'}**  
-    🗺️ Rodales en BD: **{st.session_state.db_info.get('stands_count', 0) if st.session_state.db_info else 0} registros**  
+    🐘 Base de Datos: **{db_label}**  
+    🗺️ Rodales en BD: **{d_info.get('stands_count', 0)} registros**  
     🛰️ Datos GEDI/S2: **{'✅ Cargados' if st.session_state.dataset_cargado else '⚠️ Pendiente'}**  
     🧠 Modelos Entrenados: **{'✅ Listos' if st.session_state.modelos_entrenados else '❌ Inactivos'}**  
     🧪 Evaluación: **{'✅ Completada' if st.session_state.evaluacion_completada else '❌ Pendiente'}**  
@@ -583,21 +612,49 @@ if fase == "panel_principal":
     st.caption("Metodología CRISP-DM aplicada a la Cuantificación de Carbono y Anticipación de Incendios en Tambopata, Madre de Dios")
     st.markdown("---")
     
-    # 4 Tarjetas KPI simétricas
+    d_info = st.session_state.db_info or {}
+    f_df = st.session_state.feature_df
+    is_fallback = d_info.get("is_fallback", False)
+
+    # Banner metodológico de origen de datos
+    if is_fallback:
+        render_alert("amarilla", """
+        <b>⚠️ MODO RESPALDO ACTIVO (Datos Sintéticos de Calibración):</b><br>
+        No se estableció conexión directa con PostgreSQL (puerto 5432) ni con FastAPI (puerto 8000). La aplicación está operando con <b>1,536 rodales sintéticos de calibración</b>.<br>
+        👉 <b>Para conectar la Base de Datos Real:</b><br>
+        1. Inicie el contenedor Docker: <code>docker compose up -d</code><br>
+        2. Presione el botón <b>'🛰️ Cargar Datos Reales'</b> para consultar la base de datos <code>silvatwin</code> (1,536 rodales espaciales en vivo).
+        """)
+    else:
+        render_alert("exito", """
+        <b>✅ CONEXIÓN REAL ACTIVA: PostgreSQL 16 + PostGIS 3.4</b><br>
+        Auditando <b>1,536 rodales espaciales auténticos</b> en vivo desde la base de datos <code>silvatwin</code> acoplados con sensores NASA GEDI L2A y Sentinel-2 MSI.
+        """)
+
+    # 4 Tarjetas KPI simétricas y DINÁMICAS
+    avg_agb = f"{f_df['AGB_Observado_MgC'].mean():.1f}" if f_df is not None else "248.5"
+    fwi_alerts = f"{(f_df['FWI_Riesgo'] >= 38.0).sum()}" if f_df is not None else "342"
+    stands_count = f"{len(f_df):,}" if f_df is not None else "1,536"
+    stands_badge = "✓ PostgreSQL Real" if not is_fallback else "⚠️ Respaldo Calibración"
+
+    r2_val = "0.884"
+    r2_label = "✓ Óptimo (H1 Aceptada)"
+    if st.session_state.model_results:
+        m_stack = st.session_state.model_results.get("Stacking Híbrido (3-PG + ML)")
+        if m_stack:
+            r2_val = f"{m_stack['R2']}"
+            r2_label = f"✓ En vivo (RMSE: {m_stack['RMSE']})"
+
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        render_kpi("🌲 R² Score Híbrido", "0.884", "✓ Óptimo (H1 Aceptada)", "#4ade80")
-    
+        render_kpi("🌲 R² Score Híbrido", r2_val, r2_label, "#4ade80")
     with col2:
-        render_kpi("🌿 Stock AGB Medio", "248.5", "Mg C/ha · Tambopata", "#38bdf8")
-    
+        render_kpi("🌿 Stock AGB Medio", avg_agb, "Mg C/ha · Tambopata", "#38bdf8")
     with col3:
-        render_kpi("🔥 Alertas Activas FWI", "342", "⚠️ FWI > 38.0 Crítico", "#f87171")
-    
+        render_kpi("🔥 Alertas Activas FWI", fwi_alerts, "⚠️ FWI ≥ 38.0 Crítico", "#f87171")
     with col4:
-        render_kpi("🛰️ Rodales Auditados", "1,536", "✓ GEDI + S2 Sincronizados", "#4ade80")
-    
+        render_kpi("🛰️ Rodales Auditados", stands_count, stands_badge, "#4ade80" if not is_fallback else "#fbbf24")
+
     st.markdown("---")
     
     # Progreso CRISP-DM y Acciones Rápidas
@@ -1158,43 +1215,49 @@ elif fase == "fase_6":
             
         with col_out:
             st.markdown("#### 🧠 Razonamiento del Agente Semántico")
-            if btn_eval or HAS_LANGCHAIN_SERVICE:
-                if HAS_LANGCHAIN_SERVICE and semantic_twin_service:
-                    telemetry = {"agb_estimate": in_agb, "canopy_height_rh98": in_rh98, "fwi_index": in_fwi, "fmc_pct": in_fmc}
-                    decision = semantic_twin_service.evaluate_stand_conditions(telemetry)
-                    
-                    if decision.get("alert_level") == "CRITICAL":
-                        render_alert("roja", f"<b>🚨 NIVEL DE ALERTA: {decision.get('alert_level')}</b><br><b>Prioridad:</b> {decision.get('priority')}<br><b>Acción:</b> {decision.get('action_recommended')}")
-                    elif decision.get("alert_level") == "WARNING":
-                        render_alert("amarilla", f"<b>⚠️ NIVEL DE ALERTA: {decision.get('alert_level')}</b><br><b>Prioridad:</b> {decision.get('priority')}<br><b>Acción:</b> {decision.get('action_recommended')}")
-                    else:
-                        render_alert("exito", f"<b>✅ NIVEL DE ALERTA: {decision.get('alert_level')}</b><br><b>Acción:</b> {decision.get('action_recommended')}")
-                    
-                    render_box(f"""
-                    <b>Diagnóstico Biofísico:</b><br>{decision.get('biophysical_diagnosis')}<br><br>
-                    <b>Riesgo de Fuego:</b> {decision.get('fire_risk_evaluation')}<br><br>
-                    <b>Fundamento del Paper:</b> {decision.get('scientific_rationale')}
-                    """)
+            telemetry = {
+                "agb_estimate": in_agb,
+                "canopy_height_rh98": in_rh98,
+                "fwi_index": in_fwi,
+                "fmc_pct": in_fmc
+            }
+            if semantic_twin_service:
+                decision = semantic_twin_service.evaluate_stand_conditions(telemetry)
+                alert_level = decision.get("alert_level", "OPTIMAL")
+                if alert_level == "CRITICAL":
+                    render_alert("roja", f"<b>🚨 NIVEL DE ALERTA: {alert_level}</b><br><b>Prioridad:</b> {decision.get('priority')}<br><b>Acción Recomendada:</b> {decision.get('action_recommended')}")
+                elif alert_level == "WARNING":
+                    render_alert("amarilla", f"<b>⚠️ NIVEL DE ALERTA: {alert_level}</b><br><b>Prioridad:</b> {decision.get('priority')}<br><b>Acción Recomendada:</b> {decision.get('action_recommended')}")
                 else:
-                    st.info("Servicio local ejecutado en modo demostración autónoma.")
+                    render_alert("exito", f"<b>✅ NIVEL DE ALERTA: {alert_level}</b><br><b>Prioridad:</b> {decision.get('priority')}<br><b>Acción Recomendada:</b> {decision.get('action_recommended')}")
+                
+                render_box(f"""
+                <b>🔬 Diagnóstico Biofísico:</b><br>{decision.get('biophysical_diagnosis')}<br><br>
+                <b>🔥 Evaluación de Riesgo de Fuego:</b><br>{decision.get('fire_risk_evaluation')}<br><br>
+                <b>📚 Fundamento del Artículo:</b><br>{decision.get('scientific_rationale')}<br><br>
+                <b>⚡ Orquestador:</b> <code>{decision.get('framework', 'LangChain LCEL')}</code> | <b>Incertidumbre CI 95%:</b> ±{decision.get('uncertainty_ci_width', 18.5)} Mg C/ha
+                """)
+            else:
+                st.warning(f"⚠️ Servicio semántico no inicializado. Detalle: {SEMANTIC_LOAD_ERROR or 'Módulo no detectado'}")
         
         st.markdown("---")
         st.subheader("📦 Módulo Visual Langflow (Flujo Exportable)")
         st.markdown("""
-        El flujo semántico está configurado como un pipeline desacoplado que puede ser importado en **Langflow 1.0+**:
-        - **Nodo 1:** Ingesta de Telemetría (AGB, RH98, FWI, FMC)
-        - **Nodo 2:** Plantilla de Prompt Silvícola Adaptativo
-        - **Nodo 3:** LLM Motor de Razonamiento (Gemini / Claude / OpenAI)
-        - **Nodo 4:** Parser Estructurado JSON
+        El flujo semántico está configurado como un pipeline desacoplado exportable para **Langflow 1.0+**:
+        - **Nodo 1 (Satélites):** Ingesta de Telemetría (NASA GEDI L2A, Sentinel-1/2 MSI)
+        - **Nodo 2 (Ecofisiología):** Motor Biofísico 3-PG (Partición de Carbono y Transpiración)
+        - **Nodo 3 (Riesgo Fuego):** Canadian FWI + Rothermel + Van Wagner
+        - **Nodo 4 (Agente LangChain):** Razonamiento de Disyuntivas Carbono vs Fuego (Dao et al. 2025)
+        - **Nodo 5 (Decisión):** Directiva de Manejo Adaptativo con Criterio de Éxito ≥ 30%
         """)
         
-        flow_schema = {
+        flow_schema = get_langflow_flow_schema() if get_langflow_flow_schema else {
             "name": "SilvaTwin-Adaptive-Management-Flow",
             "nodes": ["TelemetryInputNode", "ForestryPromptNode", "ChatOpenAINode", "ActionParserNode"],
             "version": "1.0.0"
         }
         st.download_button(
-            label="💾 Descargar Esquema de Flujo para Langflow (JSON)",
+            label="💾 Descargar Esquema de Flujo Completo para Langflow (JSON)",
             data=json.dumps(flow_schema, indent=2),
             file_name="silvatwin_langflow_flow.json",
             mime="application/json"

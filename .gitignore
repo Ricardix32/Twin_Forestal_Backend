@@ -43,3 +43,6 @@ silvatwin.db-journal
 .vscode/
 .idea/
 *.log
+
+#modelos entrenados
+modelos_entrenados/*
