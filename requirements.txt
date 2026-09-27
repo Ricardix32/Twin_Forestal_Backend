@@ -17,5 +17,8 @@ langchain-core>=0.3.0
 streamlit>=1.40.0
 pystac-client
 planetary-computer
+plotly>=5.24.0
+scikit-learn==1.7.2
+joblib>=1.4.0
 
 
