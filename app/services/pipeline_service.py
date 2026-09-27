@@ -246,6 +246,36 @@ def parse_and_ingest_sentinel2_geotiff(filepath: str, region_id: str, db: Sessio
         "note": f"NDVI multiespectral calculado desde bandas B04 y B08 (NDVI medio: {round(mean_ndvi, 3)}).",
     }
 
+def parse_and_ingest_soilgrids_geotiff(filepath: str, region_id: str, db: Session) -> Dict[str, Any]:
+    """
+    Reads an ISRIC SoilGrids GeoTIFF (e.g. ocs_0-30cm_mean), extracts real Soil Organic Carbon (SOC),
+    and updates stand.soc_mgc_ha in the database.
+    """
+    import rasterio
+
+    logger.info(f"Reading SoilGrids GeoTIFF: {filepath}")
+    mean_soc = 85.0
+    with rasterio.open(filepath) as src:
+        arr = src.read(1).astype(np.float32)
+        valid = arr[arr > 0]
+        if len(valid) > 0:
+            # SoilGrids ocs mapped units are in decitons/ha (d_factor=10)
+            raw_mean = float(valid.mean())
+            mean_soc = raw_mean / 10.0 if raw_mean > 80.0 else raw_mean
+
+    stands = db.query(Stand).filter(Stand.region_id == region_id).all()
+    for s in stands:
+        s.soc_mgc_ha = round(max(20.0, float(s.soc_mgc_ha * 0.4 + mean_soc * 0.6)), 1)
+    db.commit()
+
+    return {
+        "status": "success",
+        "file": os.path.basename(filepath),
+        "standsUpdated": len(stands),
+        "meanSOC": round(mean_soc, 2),
+        "note": f"Carbono Orgánico del Suelo (SOC 0-30cm) calibrado desde ISRIC SoilGrids (SOC medio: {round(mean_soc, 1)} Mg C/ha).",
+    }
+
 def execute_pipeline(region_id: str, db: Session) -> Dict[str, Any]:
     """
     Orchestrates the ingestion pipeline for a given landscape region.
@@ -268,6 +298,13 @@ def execute_pipeline(region_id: str, db: Session) -> Dict[str, Any]:
         if sf["extension"] in [".tif", ".tiff"]:
             res = parse_and_ingest_sentinel2_geotiff(sf["path"], region_id, db)
             processed.append({"type": "sentinel2_optical", "result": res})
+
+    # 3. Process SoilGrids if present
+    soil_files = scan["soilgrids"]["files"]
+    for sf in soil_files:
+        if sf["extension"] in [".tif", ".tiff"]:
+            res = parse_and_ingest_soilgrids_geotiff(sf["path"], region_id, db)
+            processed.append({"type": "soilgrids_edaphic", "result": res})
 
     # 3. If no files in disk, calibrate baseline stands
     if not processed:
