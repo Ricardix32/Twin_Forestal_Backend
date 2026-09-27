@@ -707,12 +707,17 @@ if fase == "panel_principal":
             st.rerun()
     
     if st.session_state.feature_df is not None:
+        f_df = st.session_state.feature_df
+        d_info = st.session_state.db_info or {}
+        is_fallback = d_info.get("is_fallback", False)
+        stands_badge = "PostgreSQL 16 + PostGIS" if not is_fallback else "Calibración Sintética"
+        
         st.markdown("---")
-        st.subheader("📊 Distribución Biofísica y de Incendios en los 1,536 Rodales Reales")
+        st.subheader(f"📊 Distribución Biofísica y de Incendios en los {len(f_df):,} Rodales ({stands_badge})")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             fig_agb_hist = px.histogram(
-                st.session_state.feature_df, x="AGB_Observado_MgC", nbins=30,
+                f_df, x="AGB_Observado_MgC", nbins=30,
                 title="Distribución de Biomasa Aérea AGB (Mg C/ha)",
                 labels={"AGB_Observado_MgC": "Biomasa Aérea AGB (Mg C/ha)", "count": "Número de Rodales"},
                 template="plotly_dark", color_discrete_sequence=["#10b981"]
@@ -721,7 +726,7 @@ if fase == "panel_principal":
             
         with col_g2:
             fig_fwi_hist = px.histogram(
-                st.session_state.feature_df, x="FWI_Riesgo", nbins=30,
+                f_df, x="FWI_Riesgo", nbins=30,
                 title="Distribución del Índice de Peligro de Incendio (FWI)",
                 labels={"FWI_Riesgo": "Índice FWI", "count": "Número de Rodales"},
                 template="plotly_dark", color_discrete_sequence=["#f87171"]
@@ -730,14 +735,43 @@ if fase == "panel_principal":
             
     st.markdown("---")
     
-    st.subheader("💡 Interpretación Metodológica del Panel")
-    render_box("""
-    <b>📍 Síntesis Ejecutiva del Gemelo Digital Forestal:</b><br>
-    El sistema ha acoplado con éxito las observaciones biofísicas de <b>LiDAR espacial (NASA GEDI L2A)</b> con la reflectancia multiespectral de <b>Sentinel-2 MSI</b> y el modelo ecofisiológico 3-PG, alcanzando un <b>R² de 0.884</b> y reduciendo el RMSE en un <b>32.8%</b> respecto a los inventarios tradicionales.<br><br>
+    # Cálculos 100% dinámicos para la síntesis metodológica
+    f_df = st.session_state.feature_df
+    m_res = st.session_state.model_results
+    d_info = st.session_state.db_info or {}
+    is_fallback = d_info.get("is_fallback", False)
     
-    <b>🌲 Implicaciones Clave para Tambopata:</b><br>
-    • Se estiman <b>248.5 Mg C/ha</b> de biomasa aérea (AGB) promedio en los rodales analizados.<br>
-    • Se detectan <b>342 rodales en Alerta Roja</b> por FWI > 38.0 y humedad de combustible (FMC) < 80%.<br>
+    agb_promedio = f"{f_df['AGB_Observado_MgC'].mean():.1f} Mg C/ha" if f_df is not None else "248.5 Mg C/ha"
+    rodales_rojos = int((f_df['FWI_Riesgo'] >= 38.0).sum()) if f_df is not None else 342
+    rodales_fmc_criticos = int((f_df['FMC_pct'] < 80.0).sum()) if f_df is not None else 215
+    total_rodales = len(f_df) if f_df is not None else 1536
+    pct_alerta = round((rodales_rojos / total_rodales * 100), 1) if total_rodales else 22.3
+    origen_bd_txt = "PostgreSQL 16 + PostGIS en vivo" if not is_fallback else "muestra de calibración sintética de respaldo"
+
+    if m_res and "Stacking Híbrido (3-PG + ML)" in m_res:
+        m_stack = m_res["Stacking Híbrido (3-PG + ML)"]
+        m_base = m_res.get("ElasticNet", {})
+        r2_val = m_stack.get("R2", 0.884)
+        rmse_val = m_stack.get("RMSE", 1.91)
+        base_rmse = m_base.get("RMSE", 2.84)
+        red_rmse = round((1 - rmse_val / base_rmse) * 100, 1) if base_rmse else 32.8
+        
+        r2_txt = f"un <b>R² de {r2_val}</b>"
+        reduccion_txt = f"reduciendo el error RMSE en un <b>{red_rmse}%</b> (de {base_rmse} a {rmse_val} Mg C/ha)"
+        estado_modelo = "calculado en vivo tras entrenar los 4 modelos sobre los rodales"
+    else:
+        r2_txt = "un <b>R² de 0.884</b>"
+        reduccion_txt = "reduciendo el RMSE en un <b>32.8%</b> respecto a la línea base"
+        estado_modelo = "valores referenciales de calibración (use '🌲 Entrenar Todos los Modelos' para ver el cálculo en vivo)"
+
+    st.subheader("💡 Interpretación Metodológica del Panel")
+    render_box(f"""
+    <b>📍 Síntesis Ejecutiva del Gemelo Digital Forestal:</b><br>
+    El sistema ha acoplado las observaciones biofísicas de <b>LiDAR espacial (NASA GEDI L2A)</b> con la reflectancia multiespectral de <b>Sentinel-2 MSI</b> y el modelo ecofisiológico 3-PG, alcanzando {r2_txt} y {reduccion_txt} ({estado_modelo}).<br><br>
+    
+    <b>🌲 Implicaciones Clave para Tambopata ({total_rodales:,} rodales auditados en {origen_bd_txt}):</b><br>
+    • Se estiman <b>{agb_promedio}</b> de biomasa aérea (AGB) promedio en los rodales analizados.<br>
+    • Se detectan <b>{rodales_rojos:,} rodales en Alerta Roja ({pct_alerta}%)</b> por FWI ≥ 38.0 y {rodales_fmc_criticos:,} rodales con desecación severa de combustible foliar (FMC < 80%).<br>
     • El motor semántico con <b>LangChain</b> y el orquestador visual <b>Langflow</b> permiten generar recomendaciones de contingencia en menos de 2 segundos.<br><br>
     
     <b>🎯 Recomendación Científica:</b> Inspeccione la <b>Fase 4 (Modelado)</b> para analizar los hiperparámetros o la <b>Fase 6 (Despliegue)</b> para ejecutar simulaciones climáticas What-If a 50 años.
@@ -1155,10 +1189,13 @@ elif fase == "fase_6":
     
     with tab1:
         st.subheader("🚀 Consola Operacional de Producción en Tiempo Real")
+        f_df = st.session_state.feature_df
+        alert_count = int((f_df['FWI_Riesgo'] >= 38.0).sum()) if f_df is not None else 342
+        
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Latencia de Inferencia", "7.2 ms", delta="Sub-segundo")
         col2.metric("Drift de Datos (PSI)", "0.038", delta="✓ Estable (< 0.1)")
-        col3.metric("Rodales en Alerta Roja", "342 rodales", delta="FWI Crítico", delta_color="inverse")
+        col3.metric("Rodales en Alerta Roja", f"{alert_count:,} rodales", delta="FWI Crítico", delta_color="inverse")
         col4.metric("Sincronización API", "Activa", delta="FastAPI :8000")
         
         st.markdown("---")
@@ -1184,7 +1221,7 @@ elif fase == "fase_6":
             
         with col_chart:
             anios = np.arange(2026, 2076)
-            stock_base = 248.5
+            stock_base = round(st.session_state.feature_df['AGB_Observado_MgC'].mean(), 1) if st.session_state.feature_df is not None else 248.5
             growth_rate = 1.8 - 0.25 * temp_delta + 0.015 * precip_delta - 0.04 * logging_rate
             trajectory = stock_base + np.cumsum(growth_rate + np.random.normal(0, 0.4, len(anios)))
             traj_baseline = stock_base + np.cumsum(1.8 + np.random.normal(0, 0.3, len(anios)))
