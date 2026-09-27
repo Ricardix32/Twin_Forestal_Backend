@@ -47,6 +47,13 @@ app.add_middleware(
 # Include API v1 routes
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+from fastapi.responses import RedirectResponse
+
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirige automáticamente la raíz a la documentación Swagger."""
+    return RedirectResponse(url="/docs")
+
 @app.get("/health", tags=["Health"])
 def health_check():
     return {
