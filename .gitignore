@@ -23,6 +23,7 @@ data/fluxnet/*.csv
 data/soilgrids/*.tif
 data/era5/*.nc
 data/era5/*.grib*
+data/era5/*.csv
 
 # Mantener la estructura de carpetas
 !data/**/README.md
