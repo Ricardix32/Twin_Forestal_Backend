@@ -48,3 +48,5 @@ silvatwin.db-journal
 modelos_entrenados/
 best_forestry_model.joblib
 model_metadata.json
+
+Artefacto_*.md
