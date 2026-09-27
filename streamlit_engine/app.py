@@ -26,7 +26,21 @@ except Exception:
 # Configuración de rutas y desambiguación del paquete 'app'
 CURRENT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = CURRENT_DIR.parent
-DATA_DIR = BACKEND_DIR / "data"
+
+def resolve_data_dir() -> Path:
+    candidates = [
+        BACKEND_DIR / "data",
+        CURRENT_DIR.parent / "data",
+        CURRENT_DIR / "data",
+        Path("data").resolve(),
+        Path("../data").resolve(),
+    ]
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            return c
+    return BACKEND_DIR / "data"
+
+DATA_DIR = resolve_data_dir()
 
 # Evitar que 'streamlit_engine/app.py' oculte el paquete 'Twin_Forestal_Backend/app'
 curr_str = str(CURRENT_DIR)
@@ -35,7 +49,7 @@ sys.path = [p for p in sys.path if p not in (curr_str, '', '.')]
 if backend_str not in sys.path:
     sys.path.insert(0, backend_str)
 
-# Carga robusta del servicio semántico LangChain (inmune a colisiones de rutas)
+# Carga robusta del servicio semántico LangChain (inmune a colisiones de rutas y linters)
 import importlib.util
 
 semantic_twin_service = None
@@ -56,7 +70,10 @@ try:
 except Exception as e_spec:
     SEMANTIC_LOAD_ERROR = str(e_spec)
     try:
-        from app.services.semantic_twin import semantic_twin_service, get_langflow_flow_schema
+        # Import dinámico seguro para evitar advertencias de imports estáticos no resueltos
+        _sem_mod = importlib.import_module("app.services.semantic_twin")
+        semantic_twin_service = getattr(_sem_mod, "semantic_twin_service", None)
+        get_langflow_flow_schema = getattr(_sem_mod, "get_langflow_flow_schema", None)
         HAS_LANGCHAIN_SERVICE = semantic_twin_service is not None
     except Exception as e_direct:
         SEMANTIC_LOAD_ERROR = f"{e_spec} | {e_direct}"
@@ -294,12 +311,36 @@ def inicializar_estado():
         if key not in st.session_state:
             st.session_state[key] = value
 
+    # Validación de sincronización: Si faltan datasets reales en memoria o en session_state, cargarlos automáticamente
+    needs_sync = (
+        not st.session_state.get("dataset_cargado", False)
+        or not isinstance(st.session_state.get("soilgrids_info"), dict)
+        or not st.session_state.get("soilgrids_info", {}).get("file_found", False)
+        or not isinstance(st.session_state.get("era5_info"), dict)
+        or not st.session_state.get("era5_info", {}).get("file_found", False)
+        or not isinstance(st.session_state.get("fluxnet_info"), dict)
+        or not st.session_state.get("fluxnet_info", {}).get("file_found", False)
+    )
+    if needs_sync:
+        try:
+            g, s, sg, e, fn, f_df, d = load_real_datasets()
+            st.session_state.gedi_info = g
+            st.session_state.sentinel_info = s
+            st.session_state.soilgrids_info = sg
+            st.session_state.era5_info = e
+            st.session_state.fluxnet_info = fn
+            st.session_state.feature_df = f_df
+            st.session_state.db_info = d
+            st.session_state.dataset_cargado = True
+        except Exception:
+            pass
+
 inicializar_estado()
 
 # ==========================================================
 # FUNCIONES DE CARGA Y MODELADO DE DATOS REALES (5 DATASETS + POSTGRES)
 # ==========================================================
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def load_real_datasets():
     """Carga metadatos y registros reales desde PostgreSQL + PostGIS, NASA GEDI, Sentinel-2, SoilGrids, ERA5 y FLUXNET"""
     gedi_info = {"file_found": False, "beams": 0, "rh98_sample": [], "mean_rh98": 30.5}
@@ -322,7 +363,10 @@ def load_real_datasets():
     # 1. GEDI HDF5
     try:
         import h5py
-        gedi_files = sorted(list((DATA_DIR / "gedi").glob("*.h5")), key=lambda p: p.stat().st_size)
+        gedi_dir = DATA_DIR / "gedi"
+        if not gedi_dir.exists():
+            gedi_dir = BACKEND_DIR / "data" / "gedi"
+        gedi_files = sorted(list(gedi_dir.glob("*.h5")), key=lambda p: p.stat().st_size)
         if gedi_files:
             target_gedi = gedi_files[0]
             with h5py.File(target_gedi, "r") as h5f:
@@ -344,7 +388,10 @@ def load_real_datasets():
     # 2. Sentinel-2 GeoTIFF
     try:
         import rasterio
-        s2_files = list((DATA_DIR / "sentinel2").glob("*.tif"))
+        s2_dir = DATA_DIR / "sentinel2"
+        if not s2_dir.exists():
+            s2_dir = BACKEND_DIR / "data" / "sentinel2"
+        s2_files = list(s2_dir.glob("*.tif"))
         if s2_files:
             target_s2 = s2_files[0]
             with rasterio.open(target_s2) as src:
@@ -366,7 +413,10 @@ def load_real_datasets():
     # 3. ISRIC SoilGrids 2.0 GeoTIFF (SOC 0-30cm)
     try:
         import rasterio
-        sg_files = list((DATA_DIR / "soilgrids").glob("*.tif"))
+        sg_dir = DATA_DIR / "soilgrids"
+        if not sg_dir.exists():
+            sg_dir = BACKEND_DIR / "data" / "soilgrids"
+        sg_files = list(sg_dir.glob("*.tif")) + list(sg_dir.glob("*.tiff"))
         if sg_files:
             target_sg = sg_files[0]
             with rasterio.open(target_sg) as src_sg:
@@ -386,7 +436,15 @@ def load_real_datasets():
 
     # 4. ECMWF ERA5-Land Reanalysis (CSV mensual y diario)
     try:
-        era5_m_path = DATA_DIR / "era5" / "era5_land_monthly_2023_madre-de-dios-peru.csv"
+        era5_dir = DATA_DIR / "era5"
+        if not era5_dir.exists():
+            era5_dir = BACKEND_DIR / "data" / "era5"
+            
+        era5_m_path = era5_dir / "era5_land_monthly_2023_madre-de-dios-peru.csv"
+        if not era5_m_path.exists():
+            m_cands = list(era5_dir.glob("*monthly*.csv"))
+            if m_cands:
+                era5_m_path = m_cands[0]
         if era5_m_path.exists():
             df_m = pd.read_csv(era5_m_path)
             era5_info["file_found"] = True
@@ -395,7 +453,11 @@ def load_real_datasets():
             era5_info["mean_temp_c"] = round(float(df_m["temp_mean_c"].mean()), 1)
             era5_info["max_vpd_kpa"] = round(float(df_m["vpd_max_kpa"].max()), 2)
             
-        era5_d_path = DATA_DIR / "era5" / "era5_land_daily_2023_madre-de-dios-peru.csv"
+        era5_d_path = era5_dir / "era5_land_daily_2023_madre-de-dios-peru.csv"
+        if not era5_d_path.exists():
+            d_cands = list(era5_dir.glob("*daily*.csv"))
+            if d_cands:
+                era5_d_path = d_cands[0]
         if era5_d_path.exists():
             df_d = pd.read_csv(era5_d_path)
             era5_info["daily_count"] = len(df_d)
@@ -404,7 +466,15 @@ def load_real_datasets():
 
     # 5. FLUXNET / AmeriFlux (Metadata de Sitio PE-QFR)
     try:
-        fn_path = DATA_DIR / "fluxnet" / "fluxnet_shuttle_snapshot_20260913T233823_selectedsites.csv"
+        fn_dir = DATA_DIR / "fluxnet"
+        if not fn_dir.exists():
+            fn_dir = BACKEND_DIR / "data" / "fluxnet"
+            
+        fn_path = fn_dir / "fluxnet_shuttle_snapshot_20260913T233823_selectedsites.csv"
+        if not fn_path.exists():
+            fn_cands = list(fn_dir.glob("*.csv"))
+            if fn_cands:
+                fn_path = fn_cands[0]
         if fn_path.exists():
             df_fn = pd.read_csv(fn_path)
             if not df_fn.empty:
@@ -423,9 +493,18 @@ def load_real_datasets():
     db_loaded = False
     try:
         from sqlalchemy import text
-        from app.core.database import SessionLocal, get_active_engine
-        from app.models.region import Region
-        from app.models.stand import Stand
+        try:
+            from app.core.database import SessionLocal, get_active_engine
+            from app.models.region import Region
+            from app.models.stand import Stand
+        except (ImportError, ModuleNotFoundError):
+            _db_mod = importlib.import_module("app.core.database")
+            SessionLocal = getattr(_db_mod, "SessionLocal")
+            get_active_engine = getattr(_db_mod, "get_active_engine")
+            _reg_mod = importlib.import_module("app.models.region")
+            Region = getattr(_reg_mod, "Region")
+            _std_mod = importlib.import_module("app.models.stand")
+            Stand = getattr(_std_mod, "Stand")
         
         active_engine = get_active_engine()
         db = SessionLocal()
@@ -649,8 +728,16 @@ def train_forestry_models(df: pd.DataFrame):
 
     return results
 
-# Carga automática de telemetría si aún no se ha invocado en sesión
-if not st.session_state.get("dataset_cargado", False):
+# Carga automática o sincronización de telemetría multi-sensor si faltan datasets en sesión
+if (
+    not st.session_state.get("dataset_cargado", False)
+    or not isinstance(st.session_state.get("soilgrids_info"), dict)
+    or not st.session_state.get("soilgrids_info", {}).get("file_found", False)
+    or not isinstance(st.session_state.get("era5_info"), dict)
+    or not st.session_state.get("era5_info", {}).get("file_found", False)
+    or not isinstance(st.session_state.get("fluxnet_info"), dict)
+    or not st.session_state.get("fluxnet_info", {}).get("file_found", False)
+):
     gedi_info, sentinel_info, soilgrids_info, era5_info, fluxnet_info, feature_df, db_info = load_real_datasets()
     st.session_state.gedi_info = gedi_info
     st.session_state.sentinel_info = sentinel_info
@@ -1126,7 +1213,13 @@ elif fase == "fase_2":
 
     with tab3:
         st.subheader("🔬 Exploración del Archivo Real GEDI L2A")
-        g = st.session_state.gedi_info
+        g = st.session_state.get("gedi_info") or {}
+        if not g.get("file_found"):
+            try:
+                g, _, _, _, _, _, _ = load_real_datasets()
+                st.session_state.gedi_info = g
+            except Exception:
+                pass
         if g.get("file_found"):
             st.success(f"✅ Archivo GEDI L2A detectado en disco: `{g.get('filename')}`")
             col1, col2, col3 = st.columns(3)
@@ -1145,7 +1238,13 @@ elif fase == "fase_2":
 
     with tab4:
         st.subheader("🗺️ Exploración de la Imagen Real Sentinel-2 L2A")
-        s = st.session_state.sentinel_info
+        s = st.session_state.get("sentinel_info") or {}
+        if not s.get("file_found"):
+            try:
+                _, s, _, _, _, _, _ = load_real_datasets()
+                st.session_state.sentinel_info = s
+            except Exception:
+                pass
         if s.get("file_found"):
             st.success(f"✅ GeoTIFF Sentinel-2 L2A detectado: `{s.get('filename')}`")
             col1, col2, col3 = st.columns(3)
@@ -1164,7 +1263,13 @@ elif fase == "fase_2":
 
     with tab5:
         st.subheader("🌍 Exploración de Carbono Orgánico del Suelo (ISRIC SoilGrids 2.0)")
-        sg = st.session_state.soilgrids_info or {}
+        sg = st.session_state.get("soilgrids_info") or {}
+        if not sg.get("file_found"):
+            try:
+                _, _, sg, _, _, _, _ = load_real_datasets()
+                st.session_state.soilgrids_info = sg
+            except Exception:
+                pass
         if sg.get("file_found"):
             st.success(f"✅ GeoTIFF SoilGrids 2.0 OGC WCS detectado: `{sg.get('filename')}`")
             col1, col2, col3 = st.columns(3)
@@ -1200,11 +1305,18 @@ elif fase == "fase_2":
             El reservorio edáfico superficial (0–30 cm) almacena en promedio <b>46.5 Mg C/ha</b> en los ultisoles y suelos aluviales de Tambopata, representando aproximadamente un <b>16% del stock total de carbono del ecosistema</b> (Carbono Total = AGB + SOC ~ 295 Mg C/ha). Integrar esta capa previene subestimaciones graves en auditorías MRV de mercados de carbono (ART-TREES / Verra).
             """)
         else:
-            st.error("No se encontró archivo SoilGrids en data/soilgrids/.")
+            err_msg = sg.get("error", "Directorio data/soilgrids/ no contiene archivos .tif válidos")
+            st.error(f"No se encontró archivo SoilGrids en data/soilgrids/. ({err_msg})")
 
     with tab6:
         st.subheader("🌦️ Reanálisis Meteorológico y Estrés Climático (ECMWF ERA5-Land)")
-        e = st.session_state.era5_info or {}
+        e = st.session_state.get("era5_info") or {}
+        if not e.get("file_found"):
+            try:
+                _, _, _, e, _, _, _ = load_real_datasets()
+                st.session_state.era5_info = e
+            except Exception:
+                pass
         if e.get("file_found"):
             st.success("✅ Series temporales horarias y mensuales de ECMWF ERA5-Land detectadas en data/era5/")
             col1, col2, col3 = st.columns(3)
@@ -1259,11 +1371,18 @@ elif fase == "fase_2":
             2. Desecación crítica de combustible fino foliar (<b>FMC < 80%</b>), disparando el índice <b>FWI a nivel de Alerta Roja (≥ 38.0)</b>.
             """)
         else:
-            st.error("No se encontraron series temporales ERA5 en data/era5/.")
+            err_msg = e.get("error", "Directorio data/era5/ no contiene archivos .csv válidos")
+            st.error(f"No se encontraron series temporales ERA5 en data/era5/. ({err_msg})")
 
     with tab7:
         st.subheader("🔬 Calibración de Flujos Micrometeorológicos (FLUXNET / AmeriFlux)")
-        fn = st.session_state.fluxnet_info or {}
+        fn = st.session_state.get("fluxnet_info") or {}
+        if not fn.get("file_found"):
+            try:
+                _, _, _, _, fn, _, _ = load_real_datasets()
+                st.session_state.fluxnet_info = fn
+            except Exception:
+                pass
         if fn.get("file_found"):
             st.success(f"✅ Torre Micrometeorológica Eddy Covariance detectada: `{fn.get('site_id')}` — `{fn.get('site_name')}`")
             col1, col2, col3 = st.columns(3)
@@ -1287,7 +1406,8 @@ elif fase == "fase_2":
             La torre <b>PE-QFR</b> proporciona mediciones in-situ directas de intercambio neto de CO₂ (<b>NEE</b>, ~ -1.45 g C/m²/día) y fotosíntesis bruta (<b>GPP</b>, ~ 8.24 g C/m²/día). Estos datos son utilizados por SilvaTwin para calibrar la función de eficiencia de uso de radiación ($\\epsilon_{LUE}$) y la respiración de mantenimiento en el sub-módulo ecofisiológico 3-PG.
             """)
         else:
-            st.error("No se encontró registro de FLUXNET en data/fluxnet/.")
+            err_msg = fn.get("error", "Directorio data/fluxnet/ no contiene archivos .csv válidos")
+            st.error(f"No se encontró registro de FLUXNET en data/fluxnet/. ({err_msg})")
 
 # ---------- FASE 3: PREPARACIÓN DE DATOS ----------
 elif fase == "fase_3":
