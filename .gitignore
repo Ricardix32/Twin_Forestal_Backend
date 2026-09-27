@@ -45,8 +45,7 @@ silvatwin.db-journal
 *.log
 
 #modelos entrenados
-modelos_entrenados/
-best_forestry_model.joblib
-model_metadata.json
+modelos_entrenados/*.joblib
+modelos_entrenados/*.json
 
 Artefacto_*.md
