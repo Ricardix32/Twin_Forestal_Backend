@@ -276,6 +276,37 @@ def parse_and_ingest_soilgrids_geotiff(filepath: str, region_id: str, db: Sessio
         "note": f"Carbono Orgánico del Suelo (SOC 0-30cm) calibrado desde ISRIC SoilGrids (SOC medio: {round(mean_soc, 1)} Mg C/ha).",
     }
 
+def parse_and_ingest_era5_csv(filepath: str, region_id: str, db: Session) -> Dict[str, Any]:
+    """
+    Reads ECMWF ERA5-Land monthly reanalysis CSV and updates FluxTimeSeries bioclimatic forcing parameters.
+    """
+    import pandas as pd
+
+    logger.info(f"Reading ERA5-Land Reanalysis: {filepath}")
+    df = pd.read_csv(filepath)
+    if "month_label" not in df.columns:
+        return {"status": "skipped", "reason": "Not a monthly ERA5 summary"}
+
+    series = db.query(FluxTimeSeries).filter(FluxTimeSeries.region_id == region_id).all()
+    updated_points = 0
+    if series:
+        for idx, row in df.iterrows():
+            if idx < len(series):
+                fts = series[idx]
+                fts.temp_c = float(row.get("temp_mean_c", fts.temp_c))
+                fts.precip_mm = float(row.get("precip_mm", fts.precip_mm))
+                fts.vpd_kpa = float(row.get("vpd_max_kpa", fts.vpd_kpa))
+                fts.rad_mj_m2 = float(row.get("rad_solar_mj_m2", fts.rad_mj_m2))
+                updated_points += 1
+        db.commit()
+
+    return {
+        "status": "success",
+        "file": os.path.basename(filepath),
+        "monthsUpdated": updated_points,
+        "note": f"Series bioclimáticas calibradas desde ECMWF ERA5-Land Reanalysis ({updated_points} meses).",
+    }
+
 def execute_pipeline(region_id: str, db: Session) -> Dict[str, Any]:
     """
     Orchestrates the ingestion pipeline for a given landscape region.
@@ -305,6 +336,13 @@ def execute_pipeline(region_id: str, db: Session) -> Dict[str, Any]:
         if sf["extension"] in [".tif", ".tiff"]:
             res = parse_and_ingest_soilgrids_geotiff(sf["path"], region_id, db)
             processed.append({"type": "soilgrids_edaphic", "result": res})
+
+    # 4. Process ERA5 if present
+    era5_files = scan["era5"]["files"]
+    for ef in era5_files:
+        if "monthly" in ef["filename"] and ef["extension"] == ".csv":
+            res = parse_and_ingest_era5_csv(ef["path"], region_id, db)
+            processed.append({"type": "era5_climate_reanalysis", "result": res})
 
     # 3. If no files in disk, calibrate baseline stands
     if not processed:
