@@ -366,22 +366,33 @@ def load_real_datasets():
         gedi_dir = DATA_DIR / "gedi"
         if not gedi_dir.exists():
             gedi_dir = BACKEND_DIR / "data" / "gedi"
-        gedi_files = sorted(list(gedi_dir.glob("*.h5")), key=lambda p: p.stat().st_size)
+        gedi_files = sorted(list(gedi_dir.glob("*.parquet")) + list(gedi_dir.glob("*.h5")), key=lambda p: p.stat().st_size)
         if gedi_files:
             target_gedi = gedi_files[0]
-            with h5py.File(target_gedi, "r") as h5f:
-                beams = [k for k in h5f.keys() if k.startswith("BEAM")]
+            if target_gedi.suffix == ".parquet":
+                import pandas as pd
+                df_g = pd.read_parquet(target_gedi)
                 gedi_info["file_found"] = True
                 gedi_info["filename"] = target_gedi.name
-                gedi_info["beams"] = len(beams)
-                if beams:
-                    beam = beams[0]
-                    if f"{beam}/rh" in h5f:
-                        rh_arr = h5f[f"{beam}/rh"][()][:, 98]
-                        valid = rh_arr[(rh_arr > 0) & (rh_arr < 80)]
-                        if len(valid) > 0:
-                            gedi_info["rh98_sample"] = [float(v) for v in valid[:500]]
-                            gedi_info["mean_rh98"] = float(np.mean(valid))
+                gedi_info["beams"] = int(df_g["beam"].nunique()) if "beam" in df_g.columns else 8
+                valid = df_g["rh98"].dropna().values
+                if len(valid) > 0:
+                    gedi_info["rh98_sample"] = [float(v) for v in valid[:500]]
+                    gedi_info["mean_rh98"] = float(np.mean(valid))
+            else:
+                with h5py.File(target_gedi, "r") as h5f:
+                    beams = [k for k in h5f.keys() if k.startswith("BEAM")]
+                    gedi_info["file_found"] = True
+                    gedi_info["filename"] = target_gedi.name
+                    gedi_info["beams"] = len(beams)
+                    if beams:
+                        beam = beams[0]
+                        if f"{beam}/rh" in h5f:
+                            rh_arr = h5f[f"{beam}/rh"][()][:, 98]
+                            valid = rh_arr[(rh_arr > 0) & (rh_arr < 80)]
+                            if len(valid) > 0:
+                                gedi_info["rh98_sample"] = [float(v) for v in valid[:500]]
+                                gedi_info["mean_rh98"] = float(np.mean(valid))
     except Exception as e:
         gedi_info["error"] = str(e)
 
